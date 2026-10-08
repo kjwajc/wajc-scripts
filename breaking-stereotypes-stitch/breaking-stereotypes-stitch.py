@@ -1,0 +1,211 @@
+import argparse
+import random
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+
+import imageio_ffmpeg
+
+# Where the script looks for audio. Kept as a global so the source can change later.
+filePath = "./Breaking Stereotypes"
+
+# Where stitched shows are written.
+outputPath = "./Stitched-Files"
+
+# True: stitch every dated show. False: stitch only singleFile.
+runAll = False
+
+# Show to stitch when runAll is False. None means the oldest dated show.
+singleFile = None
+
+# Background music level in dB, applied after the music is levelled out.
+# More negative is quieter. The music is also ducked further whenever someone speaks.
+musicVolume = -18
+
+# The most the music drops while someone speaks, in dB. Smaller lets more music through.
+musicDuck = 6
+
+# Seconds the music takes to fade out at the end of each file.
+musicFadeOut = 5
+
+# Where in the music track the first play starts, in seconds. Later loops play the whole track.
+musicStart = 28
+
+# True: master each stitched file with wajc-mastering.py. Turn off for one run with --no-wajc-mastering.
+wajcMastering = True
+
+SHOWS_FOLDER = "Original BS's for editting"
+INTRO_OUTRO_FOLDER = "Intros-Outros/Original Intro-Outro Recordings"
+BACKGROUND_MUSIC = "Intros-Outros/background-music.m4a"
+
+# "01.05.2025 Breaking Stereotypes.mp3" -> month, day, year
+SHOW_NAME = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})\b")
+
+# "Br St Intro - 1 (AW) - 011426.mp3" -> kind, set number, initials, optional MMDDYY date
+INTRO_OUTRO_NAME = re.compile(r"^Br St (Intro|Outro) - (\d+) \((\w+)\)(?: - (\d{6}))?$")
+
+MP3_CODEC = ["-c:a", "libmp3lame", "-q:a", "2"]
+
+MASTERING_SCRIPT = Path(__file__).resolve().parent.parent / "wajc-mastering" / "wajc-mastering.py"
+
+
+def showDate(path):
+    """Date from a show's file name. If the year disagrees with its year folder, trust the folder."""
+    month, day, year = (int(n) for n in SHOW_NAME.match(path.name).groups())
+    folder = path.parent.name
+    if folder.isdigit() and len(folder) == 4 and int(folder) != year:
+        print(f"Warning: '{path.name}' is in folder {folder}; using {folder} as its year.")
+        year = int(folder)
+    return date(year, month, day)
+
+
+def getFiles():
+    """Return every dated show under filePath's shows folder, oldest first."""
+    root = Path(filePath) / SHOWS_FOLDER
+    if not root.is_dir():
+        raise FileNotFoundError(f"Folder not found: {root.resolve()}")
+    shows = [p for p in root.rglob("*.mp3") if SHOW_NAME.match(p.name)]
+    return sorted(shows, key=showDate)
+
+
+def getIntroOutroSets():
+    """Return matched intro/outro pairs keyed by label, e.g. {"1 (AW)": (intro, outro)}.
+
+    When a set has dated and undated recordings, the most recent dated one wins.
+    """
+    folder = Path(filePath) / INTRO_OUTRO_FOLDER
+    best = {}  # (kind, label) -> (date sort key, path)
+    for p in folder.glob("*.mp3"):
+        m = INTRO_OUTRO_NAME.match(p.stem)
+        if not m:
+            continue
+        kind, number, initials, mmddyy = m.groups()
+        label = f"{number} ({initials})"
+        # YYMMDD sorts by date; undated sorts before any dated version.
+        rank = mmddyy[4:] + mmddyy[:4] if mmddyy else ""
+        if (kind, label) not in best or rank > best[(kind, label)][0]:
+            best[(kind, label)] = (rank, p)
+
+    labels = {label for _, label in best}
+    return {
+        label: (best[("Intro", label)][1], best[("Outro", label)][1])
+        for label in sorted(labels)
+        if ("Intro", label) in best and ("Outro", label) in best
+    }
+
+
+def getDuration(path):
+    """Length of an audio file in seconds, read from ffmpeg's file info."""
+    result = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+        capture_output=True, text=True,
+    )
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", result.stderr)
+    if not m:
+        raise ValueError(f"Could not read duration of {path}")
+    hours, minutes, seconds = m.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def stitch(show, intro, outro, music, output, codec=MP3_CODEC):
+    """Join intro + show + outro, lay looped background music under it, and save (MP3 by default).
+
+    The voice always takes priority: the music is first levelled out (it builds up
+    loudly partway through), set to musicVolume, then ducked whenever the voice is
+    speaking via sidechain compression.
+    """
+    parts = [intro, show, outro]
+    total = sum(getDuration(p) for p in parts)
+    fadeStart = max(0, total - musicFadeOut)
+
+    normalize = "".join(f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}];" for i in range(3))
+    joined = "[a0][a1][a2]concat=n=3:v=0:a=1,asplit=2[voice][key];"
+    # Input 3 is the first play from musicStart; input 4 loops the whole track after it.
+    bed = (
+        "[3:a]aformat=sample_rates=44100:channel_layouts=stereo[m0];"
+        "[4:a]aformat=sample_rates=44100:channel_layouts=stereo[m1];"
+        "[m0][m1]concat=n=2:v=0:a=1,"
+        "dynaudnorm=f=500:g=31,"  # flatten the music's slow build-up
+        f"volume={musicVolume}dB,"
+        f"atrim=duration={total:.3f},"
+        f"afade=t=out:st={fadeStart:.3f}:d={musicFadeOut}[bed];"
+    )
+    # mix blends un-ducked music back in, which puts a floor of musicDuck dB under the ducking.
+    duckMix = 1 - 10 ** (-musicDuck / 20)
+    duck = f"[bed][key]sidechaincompress=threshold=0.015:ratio=8:attack=20:release=800:mix={duckMix:.4f}[ducked];"
+    mix = (
+        "[voice][ducked]amix=inputs=2:duration=first:normalize=0,"
+        "alimiter=limit=0.97:level=disabled[out]"  # catch any peaks the mix pushes over
+    )
+
+    command = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y"]
+    for p in parts:
+        command += ["-i", str(p)]
+    command += ["-ss", str(musicStart), "-i", str(music)]
+    command += ["-stream_loop", "-1", "-i", str(music)]
+    command += [
+        "-filter_complex", normalize + joined + bed + duck + mix,
+        "-map", "[out]",
+        "-map_metadata", "1",
+        *codec,
+        str(output),
+    ]
+    subprocess.run(command, check=True)
+
+
+def master(stitched, show, output):
+    """Run wajc-mastering.py on the stitched audio, copying the show's tags to the output."""
+    sys.stdout.flush()  # so our output prints before the mastering script's
+    subprocess.run(
+        [sys.executable, str(MASTERING_SCRIPT), str(stitched), str(output), "--tags", str(show)],
+        check=True,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Stitch Breaking Stereotypes shows with an intro, outro and background music.")
+    parser.add_argument("--wajc-mastering", action=argparse.BooleanOptionalAction, default=wajcMastering,
+                        help="master each stitched file with wajc-mastering.py (on by default)")
+    args = parser.parse_args()
+    mastering = args.wajc_mastering
+
+    shows = getFiles()
+    if runAll:
+        selected = shows
+    elif singleFile:
+        selected = [Path(singleFile)]
+    else:
+        selected = shows[:1]
+
+    sets = getIntroOutroSets()
+    if not sets:
+        raise FileNotFoundError("No matched intro/outro sets found.")
+
+    music = Path(filePath) / BACKGROUND_MUSIC
+    if not music.is_file():
+        raise FileNotFoundError(f"Background music not found: {music.resolve()}")
+
+    outDir = Path(outputPath)
+    outDir.mkdir(parents=True, exist_ok=True)
+
+    for show in selected:
+        label = random.choice(list(sets))
+        intro, outro = sets[label]
+        suffix = " CLUFPL Python FFmpeg" if mastering else ""
+        output = outDir / f"{show.stem} - Intro-Outro {label}{suffix}.mp3"
+        print(f"{show.name}: intro/outro {label} ({intro.name}, {outro.name}) -> {output}")
+        if mastering:
+            # Stitch to lossless WAV first so the audio is only encoded to MP3 once.
+            with tempfile.TemporaryDirectory() as tempDir:
+                stitched = Path(tempDir) / "stitched.wav"
+                stitch(show, intro, outro, music, stitched, codec=["-c:a", "pcm_f32le"])
+                master(stitched, show, output)
+        else:
+            stitch(show, intro, outro, music, output)
+
+
+if __name__ == "__main__":
+    main()
