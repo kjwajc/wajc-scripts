@@ -58,7 +58,7 @@ Differences from Audition:
 
 ## Compared with Audition
 
-The full comparison, with the effect-by-effect mapping, gain curves, null tests and open questions, is in [parity-report.md](parity-report.md). In short:
+The full comparison, with the effect-by-effect mapping, gain curves, null tests and open questions, is in the [WAJC Mastering Parity Report](https://kjwajc.github.io/wajc-scripts/wajc-mastering/parity-report.html) (web page with charts; source in [parity-report.html](parity-report.html)). A plain copy is in [parity-report.md](parity-report.md). In short:
 
 Tested on `09_25_2026 STTA.mp3` (50:34, mono), mastered by the script and by Audition with the same settings:
 

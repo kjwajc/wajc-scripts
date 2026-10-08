@@ -9,6 +9,8 @@ Python scripts for WAJC audio production. They use ffmpeg for the audio work and
 
 Each script has its own folder, with a README and a `requirements.txt`.
 
+How the mastering script compares with Adobe Audition: [WAJC Mastering Parity Report](https://kjwajc.github.io/wajc-scripts/wajc-mastering/parity-report.html).
+
 ## Setup
 
 ### 1. Install Python
