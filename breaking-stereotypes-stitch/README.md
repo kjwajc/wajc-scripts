@@ -35,7 +35,7 @@ breaking-stereotypes-stitch/
 │       └── 2025/
 │           ├── 01.05.2025 Breaking Stereotypes.mp3
 │           └── ...
-└── Stitched-Files/          (created by the script)
+└── Stitched-Files/          (created by the script: stitched MP3s, plus an error log for any show that failed)
 ```
 
 - **Intros and outros** are named `Br St Intro - <number> (<initials>)` and `Br St Outro - <number> (<initials>)`. An intro and outro with the same number and initials form a pair. If a recording has dated versions (`- MMDDYY` on the end), the most recent one is used instead of the undated one.
@@ -47,18 +47,23 @@ Run the script from inside this folder, with the virtual environment active. It 
 
 ```
 cd breaking-stereotypes-stitch
-python breaking-stereotypes-stitch.py
+python breaking-stereotypes-stitch.py          # the oldest show only (a quick test)
+python breaking-stereotypes-stitch.py --all    # every show in "Original BS's for editting"
 ```
 
-It prints which intro/outro pair each show got and the mastered loudness, and writes the files to `./Stitched-Files`. An existing file with the same name is overwritten.
+It prints which intro/outro pair each show got and the mastered loudness, writes the files to `./Stitched-Files`, and finishes with a count of shows stitched, skipped and failed.
 
-Mastering is on by default, and mastered files end in ` CLUFPL Python FFmpeg.mp3`. To skip mastering for one run:
+| Option | What it does |
+|---|---|
+| `--all` | Stitch every dated show, not just the oldest. |
+| `--clear` | Empty `./Stitched-Files` first, so every show is redone. |
+| `--no-wajc-mastering` | Skip mastering for this run. |
 
-```
-python breaking-stereotypes-stitch.py --no-wajc-mastering
-```
+**Shows already stitched are skipped.** If `./Stitched-Files` already has a stitched version of a show, the show isn't done again, so you can rerun `--all` after adding new recordings and only the new ones are processed. Mastered and unmastered versions are tracked separately, so a mastered run only skips shows that already have a mastered version. To redo everything, add `--clear`.
 
-Unmastered files don't have ` CLUFPL` in the name, so the two versions don't overwrite each other.
+**Failed shows get an error log.** If a show fails, the batch carries on with the next one, and the reason is saved in `./Stitched-Files` as `<show name> error.log`, for example `01.05.2025 Breaking Stereotypes error.log`. The log names the intro/outro used, the step that failed (stitching or mastering), and ffmpeg's or Python's error message. Failed shows are retried on the next run, and the log is deleted once the show succeeds. If any show failed, the script exits with code 1.
+
+Mastered files end in ` CLUFPL Python FFmpeg.mp3`. Unmastered files don't have ` CLUFPL` in the name.
 
 ## Configuration
 
@@ -68,7 +73,7 @@ Settings are at the top of the script:
 |---|---|---|
 | `filePath` | `"./Breaking Stereotypes"` | Folder containing the layout above. |
 | `outputPath` | `"./Stitched-Files"` | Where stitched shows are saved. |
-| `runAll` | `False` | `True` stitches every dated show. `False` stitches one show. |
+| `runAll` | `False` | `True` stitches every dated show. `False` stitches one show. `--all` does the same for one run. |
 | `singleFile` | `None` | The show to stitch when `runAll` is `False`. `None` means the oldest show. To pick one, give its path, for example `"./Breaking Stereotypes/Original BS's for editting/2025/03.02.2025 Breaking Stereotypes.mp3"`. |
 | `musicVolume` | `-18` | Background music level in dB. More negative is quieter. Try steps of 2–3 dB. |
 | `musicDuck` | `6` | The most the music drops while someone speaks, in dB. Smaller lets more music through under the voice; larger pushes it further back. |

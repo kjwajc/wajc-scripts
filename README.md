@@ -4,7 +4,7 @@ Python scripts for WAJC audio production. They use ffmpeg for the audio work and
 
 | Script | What it does |
 |---|---|
-| [breaking-stereotypes-stitch](breaking-stereotypes-stitch/) | Builds Breaking Stereotypes episodes: intro + show + outro with background music, then masters them. |
+| [breaking-stereotypes-stitch](breaking-stereotypes-stitch/) | Builds Breaking Stereotypes episodes: intro + show + outro with background music, then masters them. Does one show or the whole folder (`--all`), skips shows already done, and logs any that fail. |
 | [wajc-mastering](wajc-mastering/) | WAJC mastering (compressor, then match loudness to −18 LUFS), rebuilt from the Adobe Audition chain. Works on any audio file. |
 
 Each script has its own folder, with a README and a `requirements.txt`.

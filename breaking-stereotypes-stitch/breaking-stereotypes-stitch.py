@@ -1,10 +1,13 @@
 import argparse
+import glob
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import date
+import traceback
+from datetime import date, datetime
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -15,7 +18,7 @@ filePath = "./Breaking Stereotypes"
 # Where stitched shows are written.
 outputPath = "./Stitched-Files"
 
-# True: stitch every dated show. False: stitch only singleFile.
+# True: stitch every dated show. False: stitch only singleFile. --all does the same for one run.
 runAll = False
 
 # Show to stitch when runAll is False. None means the oldest dated show.
@@ -48,6 +51,9 @@ SHOW_NAME = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})\b")
 INTRO_OUTRO_NAME = re.compile(r"^Br St (Intro|Outro) - (\d+) \((\w+)\)(?: - (\d{6}))?$")
 
 MP3_CODEC = ["-c:a", "libmp3lame", "-q:a", "2"]
+
+# Added to the output name when the file is mastered.
+MASTERED_SUFFIX = " CLUFPL Python FFmpeg"
 
 MASTERING_SCRIPT = Path(__file__).resolve().parent.parent / "wajc-mastering" / "wajc-mastering.py"
 
@@ -153,27 +159,68 @@ def stitch(show, intro, outro, music, output, codec=MP3_CODEC):
         *codec,
         str(output),
     ]
-    subprocess.run(command, check=True)
+    # Output is captured so a failure's reason can go in the show's error log.
+    subprocess.run(command, check=True, capture_output=True, text=True)
 
 
 def master(stitched, show, output):
     """Run wajc-mastering.py on the stitched audio, copying the show's tags to the output."""
-    sys.stdout.flush()  # so our output prints before the mastering script's
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, str(MASTERING_SCRIPT), str(stitched), str(output), "--tags", str(show)],
-        check=True,
+        check=True, capture_output=True, text=True,
     )
+    print(result.stdout, end="")
+
+
+def existingOutput(show, outDir, mastering):
+    """A stitched version of show already in outDir (mastered or not, to match this run), or None."""
+    for p in outDir.glob(f"{glob.escape(show.stem)} - Intro-Outro *.mp3"):
+        if p.stem.endswith(MASTERED_SUFFIX) == mastering:
+            return p
+    return None
+
+
+def writeErrorLog(path, show, step, details, error):
+    """Save why a show failed. Call from inside the except block, so the traceback is available."""
+    lines = [
+        f"Show: {show}",
+        f"Time: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        *details,
+        "",
+        f"Failed while {step}: {type(error).__name__}",
+    ]
+    if isinstance(error, subprocess.CalledProcessError):
+        lines.append(f"Exit code {error.returncode}")
+        output = "\n".join(s.strip() for s in (error.stdout, error.stderr) if s and s.strip())
+        lines += ["", "Output:", output or "(none)"]
+    else:
+        lines.append(str(error))
+    lines += ["", "Traceback:", traceback.format_exc()]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def clearFolder(folder):
+    """Delete everything inside folder. Returns how many items were removed."""
+    items = list(folder.iterdir())
+    for p in items:
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+    return len(items)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Stitch Breaking Stereotypes shows with an intro, outro and background music.")
+    parser.add_argument("--all", action="store_true", help="stitch every dated show (default: only the oldest)")
+    parser.add_argument("--clear", action="store_true", help="empty the output folder first, so every show is redone")
     parser.add_argument("--wajc-mastering", action=argparse.BooleanOptionalAction, default=wajcMastering,
                         help="master each stitched file with wajc-mastering.py (on by default)")
     args = parser.parse_args()
     mastering = args.wajc_mastering
 
     shows = getFiles()
-    if runAll:
+    if runAll or args.all:
         selected = shows
     elif singleFile:
         selected = [Path(singleFile)]
@@ -190,21 +237,49 @@ def main():
 
     outDir = Path(outputPath)
     outDir.mkdir(parents=True, exist_ok=True)
+    if args.clear:
+        print(f"Cleared {clearFolder(outDir)} item(s) from {outDir}")
 
+    done, skipped, failed = 0, 0, []
     for show in selected:
+        existing = existingOutput(show, outDir, mastering)
+        if existing:
+            print(f"{show.name}: skipped, already stitched as '{existing.name}'")
+            skipped += 1
+            continue
+
         label = random.choice(list(sets))
         intro, outro = sets[label]
-        suffix = " CLUFPL Python FFmpeg" if mastering else ""
+        suffix = MASTERED_SUFFIX if mastering else ""
         output = outDir / f"{show.stem} - Intro-Outro {label}{suffix}.mp3"
-        print(f"{show.name}: intro/outro {label} ({intro.name}, {outro.name}) -> {output}")
-        if mastering:
-            # Stitch to lossless WAV first so the audio is only encoded to MP3 once.
-            with tempfile.TemporaryDirectory() as tempDir:
-                stitched = Path(tempDir) / "stitched.wav"
-                stitch(show, intro, outro, music, stitched, codec=["-c:a", "pcm_f32le"])
-                master(stitched, show, output)
-        else:
-            stitch(show, intro, outro, music, output)
+        errorLog = outDir / f"{show.stem} error.log"
+        print(f"{show.name}: intro/outro {label} ({intro.name}, {outro.name}) -> {output}", flush=True)
+        step = "stitching"
+        try:
+            if mastering:
+                # Stitch to lossless WAV first so the audio is only encoded to MP3 once.
+                with tempfile.TemporaryDirectory() as tempDir:
+                    stitched = Path(tempDir) / "stitched.wav"
+                    stitch(show, intro, outro, music, stitched, codec=["-c:a", "pcm_f32le"])
+                    step = "mastering"
+                    master(stitched, show, output)
+            else:
+                stitch(show, intro, outro, music, output)
+        except Exception as error:
+            output.unlink(missing_ok=True)  # a half-written file would make the next run skip this show
+            details = [f"Intro/outro: {label} ({intro.name}, {outro.name})", f"Output: {output}"]
+            writeErrorLog(errorLog, show, step, details, error)
+            print(f"  FAILED while {step}; reason saved to '{errorLog.name}'")
+            failed.append(show.name)
+            continue
+        errorLog.unlink(missing_ok=True)  # an earlier failure has now been fixed
+        done += 1
+
+    print(f"\nDone: {done} stitched, {skipped} skipped (already stitched), {len(failed)} failed.")
+    for name in failed:
+        print(f"  failed: {name}")
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
